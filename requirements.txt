@@ -1,0 +1,7 @@
+pypdf
+langchain
+chromadb # Vector storage
+pytest
+flask
+flask-RESTful
+pymongo
