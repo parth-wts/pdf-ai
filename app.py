@@ -1,61 +1,123 @@
-from flask import Flask,request
-from flask_restful import Resource, Api
-from langchain.vectorstores.chroma import Chroma
-from langchain.prompts import ChatPromptTemplate
-from langchain_community.llms.ollama import Ollama
-
+from flask import Flask, request
+from langchain_community.llms import Ollama
+from langchain_community.vectorstores import Chroma
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.embeddings.fastembed import FastEmbedEmbeddings
+from langchain_community.document_loaders import PDFPlumberLoader
+from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain.chains import create_retrieval_chain
+from langchain.prompts import PromptTemplate
 
 app = Flask(__name__)
-api = Api(app)
 
-from get_embedding_function import get_embedding_function
+folder_path = "db"
 
-CHROMA_PATH = "chroma"
+cached_llm = Ollama(model="mistral")
 
-PROMPT_TEMPLATE = """
-Answer the question based only on the following context:
+embedding = FastEmbedEmbeddings()
 
-{context}
+text_splitter = RecursiveCharacterTextSplitter(
+    chunk_size=1024, chunk_overlap=80, length_function=len, is_separator_regex=False
+)
 
----
-
-Answer the question based on the above context: {question}
+raw_prompt = PromptTemplate.from_template(
+    """ 
+    <s>[INST] You are a technical assistant good at searching docuemnts. If you do not have an answer from the provided information say so. [/INST] </s>
+    [INST] {input}
+           Context: {context}
+           Answer:
+    [/INST]
 """
-
-class HelloWorld(Resource):
-    def get(self):
-        return {'hello': 'world'}
+)
 
 
-class Chat(Resource):
-    def post(self):
-        # Process the data here
-        data = request.get_json()  # Get JSON data from the request
-        query_text = data.get('query');
-        
-        # Prepare the DB.
-        embedding_function = get_embedding_function()
-        db = Chroma(persist_directory=CHROMA_PATH, embedding_function=embedding_function)
+@app.route("/ai", methods=["POST"])
+def aiPost():
+    print("Post /ai called")
+    json_content = request.json
+    query = json_content.get("query")
 
-        # Search the DB.
-        results = db.similarity_search_with_score(query_text, k=5)
+    print(f"query: {query}")
 
-        context_text = "\n\n---\n\n".join([doc.page_content for doc, _score in results])
-        prompt_template = ChatPromptTemplate.from_template(PROMPT_TEMPLATE)
-        prompt = prompt_template.format(context=context_text, question=query_text)
-        # print(prompt)
+    response = cached_llm.invoke(query)
 
-        model = Ollama(model="mistral")
-        response_text = model.invoke(prompt)
+    print(response)
 
-        sources = [doc.metadata.get("id", None) for doc, _score in results]
-        formatted_response = f"Response: {response_text}\nSources: {sources}"
-        print(formatted_response)
+    response_answer = {"answer": response}
+    return response_answer
+
+
+@app.route("/ask_pdf", methods=["POST"])
+def askPDFPost():
+    print("Post /ask_pdf called")
+    json_content = request.json
+    query = json_content.get("query")
+
+    print(f"query: {query}")
     
-        return {'received_data': formatted_response}; 201  # Return a response with status code 201 (Created)
 
-api.add_resource(HelloWorld, '/')
-api.add_resource(Chat, '/chat')
+    print("Loading vector store")
+    vector_store = Chroma(persist_directory=folder_path, embedding_function=embedding)
 
-if __name__ == '__main__':
-    app.run(debug=True)
+    print("Creating chain")
+    retriever = vector_store.as_retriever(
+        search_type="similarity_score_threshold",
+        search_kwargs={
+            "k": 5,
+            "score_threshold": 0.4,
+        },
+    )
+
+    document_chain = create_stuff_documents_chain(cached_llm, raw_prompt)
+    chain = create_retrieval_chain(retriever, document_chain)
+
+    result = chain.invoke({"input": query})
+
+    print(result)
+
+    sources = []
+    for doc in result["context"]:
+        sources.append(
+            {"source": doc.metadata["source"], "page_content": doc.page_content}
+        )
+
+    response_answer = {"answer": result["answer"], "sources": sources}
+    return response_answer
+
+
+@app.route("/pdf", methods=["POST"])
+def pdfPost():
+    file = request.files["file"]
+    file_name = file.filename
+    save_file = "pdf/" + file_name
+    file.save(save_file)
+    print(f"filename: {file_name}")
+
+    loader = PDFPlumberLoader(save_file)
+    docs = loader.load_and_split()
+    print(f"docs len={len(docs)}")
+
+    chunks = text_splitter.split_documents(docs)
+    print(f"chunks len={len(chunks)}")
+
+    vector_store = Chroma.from_documents(
+        documents=chunks, embedding=embedding, persist_directory=folder_path
+    )
+
+    vector_store.persist()
+
+    response = {
+        "status": "Successfully Uploaded",
+        "filename": file_name,
+        "doc_len": len(docs),
+        "chunks": len(chunks),
+    }
+    return response
+
+
+def start_app():
+    app.run(host="0.0.0.0", port=8080, debug=True)
+
+
+if __name__ == "__main__":
+    start_app()
