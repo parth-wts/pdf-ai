@@ -21,7 +21,10 @@ cached_llm = Ollama(model="mistral")
 embedding_function = get_embedding_function()
 
 text_splitter = RecursiveCharacterTextSplitter(
-    chunk_size=1024, chunk_overlap=80, length_function=len, is_separator_regex=False
+        chunk_size=800,
+        chunk_overlap=80,
+        length_function=len,
+        is_separator_regex=False,
 )
 
 raw_prompt = PromptTemplate.from_template(
@@ -69,8 +72,7 @@ def askPDFPost():
     query = json_content.get("query")
 
     print(f"query: {query}")
-    print("==============================================>");
-    print(embedding_function);
+    
     
     # vector_store = Chroma(persist_directory=folder_path, embedding_function=embedding)
     vector_search = MongoDBAtlasVectorSearch.from_connection_string(
@@ -79,28 +81,24 @@ def askPDFPost():
         embedding=embedding_function,
         index_name=ATLAS_VECTOR_SEARCH_INDEX_NAME,
     )
-    print(vector_search)
-    print("Creating chain")
-    # retriever = vector_store.as_retriever(
-    #     search_type="similarity_score_threshold",
-    #     search_kwargs={
-    #         "k": 5,
-    #         "score_threshold": 0.4,
-    #     },
-    # )
     
-    retriever =  vector_search.similarity_search(
-        query=query,
-        k=5,
+    retriever =  vector_search.as_retriever(
+        search_type="similarity_score_threshold",
+        search_kwargs={
+            "k": 25,
+            "score_threshold":0.4
+        },
     )
-    print(retriever);
     
+    print("*********************")
+    print(retriever)
+    print("*********************")
+
+
     document_chain = create_stuff_documents_chain(cached_llm, raw_prompt)
     chain = create_retrieval_chain(retriever, document_chain)
 
     result = chain.invoke({"input": query})
-
-    print(result)
 
     sources = []
     for doc in result["context"]:
