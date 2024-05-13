@@ -7,6 +7,9 @@ from langchain_community.document_loaders import PDFPlumberLoader
 from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain.chains import create_retrieval_chain
 from langchain.prompts import PromptTemplate
+from pymongo import MongoClient
+from langchain_community.vectorstores import MongoDBAtlasVectorSearch
+from get_embedding_function import get_embedding_function
 
 app = Flask(__name__)
 
@@ -14,7 +17,8 @@ folder_path = "db"
 
 cached_llm = Ollama(model="mistral")
 
-embedding = FastEmbedEmbeddings()
+# Prepare the DB.
+embedding_function = get_embedding_function()
 
 text_splitter = RecursiveCharacterTextSplitter(
     chunk_size=1024, chunk_overlap=80, length_function=len, is_separator_regex=False
@@ -30,6 +34,17 @@ raw_prompt = PromptTemplate.from_template(
 """
 )
 
+MONGODB_ATLAS_CLUSTER_URI = "mongodb+srv://naitikjoshi:Niletree%2323@vector-store.eqaw6.mongodb.net/?retryWrites=true&w=majority&appName=vector-store"
+
+# initialize MongoDB python client
+client = MongoClient(MONGODB_ATLAS_CLUSTER_URI)
+
+
+DB_NAME = "vstore"
+COLLECTION_NAME = "vectors"
+ATLAS_VECTOR_SEARCH_INDEX_NAME = "vector_index"
+
+MONGODB_COLLECTION = client[DB_NAME][COLLECTION_NAME]
 
 @app.route("/ai", methods=["POST"])
 def aiPost():
@@ -54,20 +69,32 @@ def askPDFPost():
     query = json_content.get("query")
 
     print(f"query: {query}")
+    print("==============================================>");
+    print(embedding_function);
     
-
-    print("Loading vector store")
-    vector_store = Chroma(persist_directory=folder_path, embedding_function=embedding)
-
-    print("Creating chain")
-    retriever = vector_store.as_retriever(
-        search_type="similarity_score_threshold",
-        search_kwargs={
-            "k": 5,
-            "score_threshold": 0.4,
-        },
+    # vector_store = Chroma(persist_directory=folder_path, embedding_function=embedding)
+    vector_search = MongoDBAtlasVectorSearch.from_connection_string(
+        MONGODB_ATLAS_CLUSTER_URI,
+        DB_NAME + "." + COLLECTION_NAME,
+        embedding=embedding_function,
+        index_name=ATLAS_VECTOR_SEARCH_INDEX_NAME,
     )
-
+    print(vector_search)
+    print("Creating chain")
+    # retriever = vector_store.as_retriever(
+    #     search_type="similarity_score_threshold",
+    #     search_kwargs={
+    #         "k": 5,
+    #         "score_threshold": 0.4,
+    #     },
+    # )
+    
+    retriever =  vector_search.similarity_search(
+        query=query,
+        k=5,
+    )
+    print(retriever);
+    
     document_chain = create_stuff_documents_chain(cached_llm, raw_prompt)
     chain = create_retrieval_chain(retriever, document_chain)
 
@@ -100,11 +127,20 @@ def pdfPost():
     chunks = text_splitter.split_documents(docs)
     print(f"chunks len={len(chunks)}")
 
-    vector_store = Chroma.from_documents(
-        documents=chunks, embedding=embedding, persist_directory=folder_path
-    )
+    # vector_store = Chroma.from_documents(
+    #     documents=chunks, embedding=embedding, persist_directory=folder_path
+    # )
 
-    vector_store.persist()
+    # vector_store.persist()
+
+
+    # insert the documents in MongoDB Atlas with their embedding
+    vector_search = MongoDBAtlasVectorSearch.from_documents(
+        documents=chunks,
+        embedding=embedding_function,
+        collection=MONGODB_COLLECTION,
+        index_name=ATLAS_VECTOR_SEARCH_INDEX_NAME,
+    )
 
     response = {
         "status": "Successfully Uploaded",
